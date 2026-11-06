@@ -127,8 +127,9 @@ if "current_content" not in st.session_state:
     st.session_state.current_content = None
 if "task" not in st.session_state:
     st.session_state.task = None
-if "quiz_submitted" not in st.session_state:
-    st.session_state.quiz_submitted = False
+# 將原本的 quiz_submitted 改為記錄作答結果，方便大按鈕判定
+if "quiz_result" not in st.session_state:
+    st.session_state.quiz_result = None
 if "learning_log" not in st.session_state:
     st.session_state.learning_log = pd.DataFrame(columns=["日期", "來源與領域", "訓練方式", "自我評分"])
 
@@ -141,3 +142,134 @@ with tab1:
     st.markdown("請選擇你要使用**秒速內建題庫**，還是花 15 秒請 **AI 讀新文獻**：")
     
     col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🚀 抽取內建特訓 (秒速)"):
+            topic = random.choice(list(builtin_library.keys()))
+            data = builtin_library[topic]
+            st.session_state.task = random.choice(tasks)
+            st.session_state.quiz_result = None # 重新抽題時清空測驗結果
+            
+            st.session_state.current_content = {
+                "title": f"內建經典題庫：{topic}",
+                "english_text": data["english_text"],
+                "vocab": data["vocab"],
+                "chinese_translation": data["chinese_translation"],
+                "sample_answer": data["sample_answer"],
+                "quiz": data["quiz"]
+            }
+
+    with col2:
+        if st.button("🤖 AI 讀最新文獻 (約15秒)"):
+            if "GEMINI_API_KEY" not in st.secrets:
+                st.error("需先設定 API 金鑰才能使用此功能！")
+            else:
+                specialty = random.choice(specialties)
+                st.session_state.task = random.choice(tasks)
+                st.session_state.quiz_result = None # 重新抽題時清空測驗結果
+                st.session_state.current_content = None 
+                
+                with st.spinner(f"正在搜尋 AAHA/ACVIM/JVIM 關於 {specialty} 的多元文獻，請稍候..."):
+                    result = generate_medical_content(specialty)
+                    if "error" in result:
+                        st.error(result["error"])
+                    else:
+                        st.session_state.current_content = {
+                            "title": f"AI 生成文獻特訓：{specialty}",
+                            "english_text": result["english_text"],
+                            "vocab": result["vocab"],
+                            "chinese_translation": result["chinese_translation"],
+                            "sample_answer": result["sample_answer"],
+                            "quiz": result["quiz"]
+                        }
+
+    # --- 渲染內容區 ---
+    if st.session_state.current_content:
+        content = st.session_state.current_content
+        
+        st.success("任務與文獻短講準備完畢！")
+        st.subheader(f"📌 主題：{content['title']}")
+        st.markdown(f"**🎯 訓練方式：{st.session_state.task['name']}**")
+        st.write(st.session_state.task["desc"])
+        
+        st.divider()
+        st.markdown("### 📖 今日特訓內容")
+        
+        text_to_read = content["english_text"]
+        
+        with st.spinner("🎧 正在生成 1 分鐘講者語音，請稍候..."):
+            tts = gTTS(text=text_to_read, lang='en', tld='us') 
+            fp = io.BytesIO()
+            tts.write_to_fp(fp)
+            st.audio(fp, format='audio/mp3')
+            
+        st.info(text_to_read)
+        st.markdown("**💡 關鍵語塊 (Lexical Chunks)：**")
+        st.write(content["vocab"])
+        
+        with st.expander("👁️ 點我核對中文翻譯與示範解答"):
+            st.markdown("**【中文翻譯】**")
+            st.write(content["chinese_translation"])
+            st.markdown("**【C1 程度示範解答 / 摘要】**")
+            st.write(content["sample_answer"])
+            
+        st.divider()
+        st.markdown("### 🧠 隨堂小測驗 (Pop Quiz)")
+        quiz_data = content["quiz"]
+        st.write(quiz_data["question"])
+        
+        # --- 全新改版：觸控友善大按鈕 ---
+        if st.session_state.quiz_result is None:
+            # 如果還沒作答，顯示選項大按鈕
+            for option in quiz_data["options"]:
+                # use_container_width=True 讓按鈕填滿手機螢幕寬度，超級好點！
+                if st.button(option, use_container_width=True, key=option):
+                    if option == quiz_data["answer"]:
+                        st.session_state.quiz_result = ("correct", quiz_data['explanation'])
+                    else:
+                        st.session_state.quiz_result = ("incorrect", quiz_data['explanation'])
+                    st.rerun() # 點擊後立即重新整理畫面顯示結果
+        else:
+            # 如果已經作答，顯示結果與詳解
+            status, explanation = st.session_state.quiz_result
+            if status == "correct":
+                st.success(f"**Correct! 🎉**\n\n{explanation}")
+            else:
+                st.error(f"**Incorrect. 💡**\n\n{explanation}")
+                
+            # 給予重新挑戰的機會
+            if st.button("🔄 重新作答", use_container_width=True):
+                st.session_state.quiz_result = None
+                st.rerun()
+        
+        st.divider()
+        st.write("⏱️ **15 分鐘專注計時與打卡**")
+        
+        self_rating = st.slider("今天口說表現給自己打幾分？(1-5分)", min_value=1, max_value=5, value=3)
+        
+        if st.button("開始計時並記錄打卡"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            for percent_complete in range(100):
+                time.sleep(9) 
+                progress_bar.progress(percent_complete + 1)
+                status_text.text(f"特訓進行中... {percent_complete + 1}%")
+            
+            st.balloons()
+            st.success("🎉 今日 15 分鐘特訓完成！")
+            
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            new_record = pd.DataFrame([{
+                "日期": today_str,
+                "來源與領域": content["title"],
+                "訓練方式": st.session_state.task["name"],
+                "自我評分": f"{'⭐' * self_rating}"
+            }])
+            st.session_state.learning_log = pd.concat([st.session_state.learning_log, new_record], ignore_index=True)
+
+with tab2:
+    st.subheader("📊 我的學習履歷")
+    if len(st.session_state.learning_log) == 0:
+        st.info("目前還沒有紀錄，趕快去完成今天的任務吧！")
+    else:
+        st.dataframe(st.session_state.learning_log, use_container_width=True, hide_index=True)
