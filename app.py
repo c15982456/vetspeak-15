@@ -18,8 +18,8 @@ if "GEMINI_API_KEY" in st.secrets:
     # 讓系統自動抓取你的 API 金鑰目前支援的所有模型
     available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     
-    # 直接選取清單中第一個確定可用的模型來生成內容，徹底避開 404 錯誤
-    model = genai.GenerativeModel(available_models[0])
+   # 依照系統最新要求，直接指定使用 3.8-flash 模型
+    model = genai.GenerativeModel('gemini-3.8-flash')
 else:
     st.error("請先在 Streamlit Secrets 中設定 GEMINI_API_KEY！")
     st.stop()
