@@ -1,2 +1,3 @@
 gTTS
 pandas
+google-generativeai
