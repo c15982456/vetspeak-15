@@ -1,275 +1,257 @@
-import streamlit as st
-import random
-import time
-from gtts import gTTS
-import io
+import io, json, os, random, re, time
+from datetime import date, timedelta
+from pathlib import Path
+
 import pandas as pd
-from datetime import datetime
-import google.generativeai as genai
-import json
-import re
+import streamlit as st
+from gtts import gTTS
+from google import genai
+from google.genai import types
 
-st.set_page_config(page_title="VetSpeak 15 - 雙引擎特訓", page_icon="🩺", layout="centered")
+from library import builtin_library
 
-# --- 設定 Gemini API ---
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-3.8-flash')
-else:
-    st.warning("尚未設定 GEMINI_API_KEY。目前僅可使用內建題庫。")
+st.set_page_config(page_title="VetSpeak 15", page_icon="🩺", layout="centered")
 
-# --- 領域與任務設定 ---
-specialties = [
-    "小動物心臟學 (Cardiology)",
-    "小動物眼科學 (Ophthalmology)",
-    "小動物臨床營養學 (Clinical Nutrition)",
-    "小動物內科學 (Internal Medicine)"
-]
+# ---------- 設定 ----------
+def secret(k, default=None):
+    try:
+        return st.secrets[k]
+    except Exception:
+        return os.getenv(k, default)
+
+API_KEY = secret("GEMINI_API_KEY")
+MODEL = secret("GEMINI_MODEL", "gemini-2.5-flash")  # 可在 secrets 改成你帳號可用的模型
+client = genai.Client(api_key=API_KEY) if API_KEY else None
+
+DATA = Path("data"); DATA.mkdir(exist_ok=True)
+LOG_F, VOC_F = DATA / "log.csv", DATA / "vocab.json"
+LOG_COLS = ["日期", "主題", "訓練方式", "分鐘", "自評"]
+IV = [1, 3, 7, 14, 30]  # 間隔複習天數
+
+specialties = ["小動物心臟學 (Cardiology)", "小動物眼科學 (Ophthalmology)",
+               "小動物臨床營養學 (Clinical Nutrition)", "小動物內科學 (Internal Medicine)",
+               "小動物腫瘤學 (Oncology)", "急診與重症 (Emergency & Critical Care)",
+               "麻醉與疼痛管理 (Anesthesia & Analgesia)", "皮膚科 (Dermatology)"]
 
 tasks = [
-    {"name": "🗣️ 影子跟讀 (Shadowing)", "desc": "先聽一次發音。接著戴上耳機，按下播放，講者說什麼慢 0.5 秒跟著唸，注意換氣與斷句。"},
-    {"name": "🎤 Q&A 實戰模擬", "desc": "聽完這段 1 分鐘的引言後，給自己 2 分鐘全英文口頭發表你的觀點。"},
-    {"name": "📝 臨床口頭摘要", "desc": "聽完語音後，用自己的話將這 1 分鐘的內容濃縮，向學員做 30 秒的精華報告。"}
+    {"name": "🗣️ 影子跟讀 (Shadowing)", "desc": "先用慢速聽一次，再切正常速度，戴上耳機比講者慢 0.5 秒跟著唸，注意換氣與斷句。最後錄下自己的版本。"},
+    {"name": "🎤 Q&A 實戰模擬", "desc": "聽完引言後，針對下方的聽眾提問，給自己 2 分鐘全英文口頭回答並錄音。"},
+    {"name": "📝 臨床口頭摘要", "desc": "聽完後不看稿，用自己的話濃縮這 1 分鐘內容，做 30 秒精華報告並錄音。"},
 ]
 
-# --- 內建秒速題庫 (1分鐘演講版) ---
-builtin_library = {
-    "MMVD 分期與 MINE 評分": {
-        "english_text": "Thank you all for being here. Today, I'd like to address a common clinical dilemma we face in veterinary cardiology: the precise timing to initiate pimobendan in dogs with Myxomatous Mitral Valve Disease. We all know that the transition from Stage B1 to Stage B2 is a critical decision point based on the ACVIM consensus guidelines. However, in routine practice, we frequently encounter 'grey-zone' cases where echocardiographic parameters, specifically the LA to Ao ratio and LVIDDN, are borderline. They might perfectly straddle the established cut-offs. This is precisely where integrating the MINE score becomes invaluable. Rather than relying solely on a rigid, binary classification, the MINE score provides granular prognostic stratification. By evaluating a combination of clinical and echocardiographic variables, it allows us to individualize pharmacological intervention. Ultimately, this multiparametric approach ensures we don't delay life-prolonging therapy in high-risk patients, while preventing premature medication in truly stable B1 dogs.",
-        "vocab": "critical decision point (關鍵決策點), perfectly straddle the cut-offs (剛好卡在臨界值邊緣), granular prognostic stratification (細緻的預後分級), multiparametric approach (多參數評估法)",
-        "chinese_translation": "各位好。今天我想探討獸醫心臟科常見的臨床難題：犬 MMVD 開始使用 pimobendan 的精確時機。我們都知道，根據 ACVIM 共識指南，從 B1 期進展到 B2 期是關鍵決策點。然而在常規實踐中，我們經常遇到「模糊地帶」病例，其超音波參數處於臨界值。這正是結合 MINE 評分發揮極大價值的地方。MINE 評分提供了更細緻的預後分層，使我們能為病患量身制定藥物介入時機，確保不延誤高風險病患的治療，同時避免對穩定的 B1 期犬隻過早投藥。",
-        "sample_answer": "The MINE score provides granular prognostic stratification for borderline cases.\n(MINE 評分為了處於邊緣的病例提供了更細緻的預後分級。)",
-        "quiz": {
-            "question": "What is the primary value of the MINE score in 'grey-zone' MMVD cases?",
-            "options": [
-                "It completely replaces echocardiography.",
-                "It provides granular prognostic stratification.",
-                "It alters the ACVIM cut-offs permanently.",
-                "It is specifically for Stage C patients."
-            ],
-            "answer": "It provides granular prognostic stratification.",
-            "explanation": "正確！MINE 評分為處於邊緣的病例提供細緻的預後分層（granular prognostic stratification）。"
-        }
-    },
-    "白內障手術 (Phacoemulsification) 術後併發症": {
-        "english_text": "Moving on to postoperative care in veterinary ophthalmology, I want to emphasize the management of postoperative ocular hypertension, or POH. This is a frequent and potentially vision-threatening complication following phacoemulsification in dogs, particularly within the first 24 hours post-op. Despite our best prophylactic efforts, we still see patients developing acute spikes in intraocular pressure. My protocol for these critical hours involves hourly monitoring of IOP. When dealing with refractory POH—cases that do not respond to first-line topical anti-glaucoma medications—we must be prepared to escalate our therapy aggressively. This might involve adding systemic carbonic anhydrase inhibitors or administering hyperosmotic agents like intravenous mannitol, provided the patient’s cardiovascular and renal status permits. The key takeaway here is that early, aggressive intervention is paramount. If we fail to aggressively manage these refractory pressure spikes, we risk irreversible damage to the optic nerve and retina, ultimately compromising the entire surgical success.",
-        "vocab": "vision-threatening complication (威脅視力的併發症), prophylactic efforts (預防措施), refractory POH (難以控制的高眼壓), escalate our therapy aggressively (積極升級治療)",
-        "chinese_translation": "接下來我想強調術後高眼壓（POH）的管理。這是犬隻晶體乳化術後常見且可能威脅視力的併發症。儘管做了最完善的預防措施，仍會遇到病患出現急性眼壓飆升。我在這段關鍵時間的準則包含每小時監測眼壓。當處理難以控制的高眼壓時，我們必須準備好積極升級治療，這可能包含全身性碳酸酐酶抑制劑或高滲透壓藥物。重點是，早期且積極的介入至關重要，否則將面臨不可逆的視神經損傷。",
-        "sample_answer": "My protocol includes hourly monitoring of IOP and escalating to systemic therapy if it remains refractory.\n(我的準則包含每小時監測眼壓，若眼壓仍難以控制則升級為全身性治療。)",
-        "quiz": {
-            "question": "In the context of postoperative ocular hypertension, what does 'refractory' mean?",
-            "options": [
-                "Resolving spontaneously.",
-                "Responsive to first-line treatment.",
-                "Resistant to normal treatment or difficult to control.",
-                "Occurring before surgery."
-            ],
-            "answer": "Resistant to normal treatment or difficult to control.",
-            "explanation": "正確！'Refractory' 指的是對一般治療沒有反應、頑固性的情況。"
-        }
-    },
-    "犬貓 CKD 臨床營養與處方飼料": {
-        "english_text": "Let’s shift our focus to clinical nutrition, specifically the dietary management of feline chronic kidney disease. We universally accept that dietary modification is the absolute cornerstone of managing CKD. However, in real-world clinical practice, we often face a significant hurdle: palatability frequently hinders patient compliance. This becomes especially challenging when transitioning a Stage 3 CKD cat to a heavily restricted renal diet. The clinical dilemma is how we balance essential phosphate restriction with the paramount importance of maintaining caloric intake and lean body mass. If a cat outright rejects the renal diet, forcing it can lead to starvation and muscle wasting, which dramatically worsens the prognosis. Therefore, my approach is pragmatic. I prioritize caloric intake and lean body mass above all. If traditional renal diets are rejected, I prefer to utilize a highly palatable senior diet combined with intestinal phosphate binders to achieve our target serum phosphorus levels.",
-        "vocab": "cornerstone (基石/核心), hinder patient compliance (阻礙病患配合度), paramount importance (至關重要), pragmatic approach (務實的方法/策略)",
-        "chinese_translation": "讓我們將焦點轉向貓慢性腎病（CKD）的飲食管理。飲食調整絕對是管理 CKD 的基石。然而，適口性往往會阻礙病患的配合度。臨床上的兩難在於，我們該如何平衡「限制磷攝取」以及「維持熱量攝取與瘦體重」這兩項至關重要的目標。如果貓咪拒絕處方飼料，強迫餵食可能導致飢餓與肌肉流失。因此，我的方法很務實：我將熱量攝取和維持瘦體重放在首位。如果處方飼料被拒絕，我傾向使用適口性極佳的高齡貓飼料，並搭配腸道磷結合劑。",
-        "sample_answer": "I prioritize caloric intake and lean body mass, using a palatable senior diet with phosphate binders if needed.\n(我優先考量熱量攝取與維持瘦體重，必要時使用適口性佳的高齡貓飼料搭配磷結合劑。)",
-        "quiz": {
-            "question": "Why is transitioning a cat to a renal diet often challenging in practice?",
-            "options": [
-                "Renal diets cause severe gastrointestinal upset.",
-                "Palatability issues frequently hinder patient compliance.",
-                "Phosphate binders negate medication effects.",
-                "Owners refuse the diet."
-            ],
-            "answer": "Palatability issues frequently hinder patient compliance.",
-            "explanation": "正確！適口性不佳 (palatability) 是導致病患不配合的最大阻礙。"
-        }
-    }
-}
+# ---------- 資料存取（存檔，重新整理也不會消失）----------
+def load_log():
+    return pd.read_csv(LOG_F) if LOG_F.exists() else pd.DataFrame(columns=LOG_COLS)
 
-# --- AI 生成邏輯 (廣泛領域版) ---
-def generate_medical_content(specialty):
-    prompt = f"""
-    你現在是一位獸醫專科醫師。請根據全部獸醫相關文獻（最偏重參考 AAHA, ACVIM, JVIM 的權威指引或近期發表），
-    隨機挑選一個關於「{specialty}」的臨床主題進行探討。
-    要求：
-    1. 不要太侷限在常見單一疾病（例如心臟科不要只講 MMVD，可以講心律不整、肺高壓等），請自由發揮多元臨床議題。
-    2. 撰寫一段長度約 1 分鐘（約 130-150 字）的英文研討會短講講稿。這是一段口語化的演講內容，請加入學術轉折語（Signposting）。
-    
-    請務必以純 JSON 格式回傳，格式必須嚴格如下，不要加入任何 Markdown 標記或額外說明：
-    {{
-        "english_text": "英文講稿內容...",
-        "vocab": "挑出 3-4 個高階醫學單字或學術語塊，格式如：word (中文), word (中文)",
-        "chinese_translation": "英文講稿的精確繁體中文翻譯",
-        "sample_answer": "針對此講稿的一句話高階總結，包含英文與繁體中文，格式如：English sentence. (中文翻譯。)",
-        "quiz": {{
-            "question": "根據講稿內容出一題英文單選題",
-            "options": ["選項 A", "選項 B", "選項 C", "選項 D"],
-            "answer": "正確的選項文字",
-            "explanation": "繁體中文的詳解"
-        }}
-    }}
-    """
-    try:
-        response = model.generate_content(prompt)
-        text = response.text
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            json_str = match.group(0)
-            return json.loads(json_str)
-        else:
-            return {"error": "生成失敗，AI 未回傳正確的格式，請再試一次。"}
-    except Exception as e:
-        return {"error": f"發生錯誤，請再試一次。詳細錯誤訊息：{e}"}
+def load_vocab():
+    return json.loads(VOC_F.read_text("utf-8")) if VOC_F.exists() else {}
 
-# --- 狀態管理區 ---
-if "current_content" not in st.session_state:
-    st.session_state.current_content = None
-if "task" not in st.session_state:
-    st.session_state.task = None
-# 將原本的 quiz_submitted 改為記錄作答結果，方便大按鈕判定
-if "quiz_result" not in st.session_state:
-    st.session_state.quiz_result = None
-if "learning_log" not in st.session_state:
-    st.session_state.learning_log = pd.DataFrame(columns=["日期", "來源與領域", "訓練方式", "自我評分"])
+def save_vocab(v):
+    VOC_F.write_text(json.dumps(v, ensure_ascii=False, indent=1), "utf-8")
 
-# --- UI 介面區 ---
-st.title("🏃 VetSpeak 15 - 雙引擎特訓")
+def streak(days):
+    d = date.today()
+    if str(d) not in days:
+        d -= timedelta(days=1)
+    n = 0
+    while str(d) in days:
+        n, d = n + 1, d - timedelta(days=1)
+    return n
 
-tab1, tab2 = st.tabs(["🚀 今日特訓", "📈 學習紀錄"])
+# ---------- 語音 / AI ----------
+@st.cache_data(show_spinner=False)
+def tts(text, slow=False):  # 快取：按任何按鈕都不會重新生成語音
+    fp = io.BytesIO()
+    gTTS(text=text, lang="en", tld="us", slow=slow).write_to_fp(fp)
+    return fp.getvalue()
 
-with tab1:
-    st.markdown("請選擇你要使用**秒速內建題庫**，還是花 15 秒請 **AI 讀新文獻**：")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🚀 抽取內建特訓 (秒速)"):
-            topic = random.choice(list(builtin_library.keys()))
-            data = builtin_library[topic]
-            st.session_state.task = random.choice(tasks)
-            st.session_state.quiz_result = None # 重新抽題時清空測驗結果
-            
-            st.session_state.current_content = {
-                "title": f"內建經典題庫：{topic}",
-                "english_text": data["english_text"],
-                "vocab": data["vocab"],
-                "chinese_translation": data["chinese_translation"],
-                "sample_answer": data["sample_answer"],
-                "quiz": data["quiz"]
-            }
+def parse_vocab(s):
+    return [{"term": t.strip(), "zh": z.strip()}
+            for t, z in re.findall(r"([^,()（）]+?)\s*[(（]([^)）]+)[)）]", s)]
 
-    with col2:
-        if st.button("🤖 AI 讀最新文獻 (約15秒)"):
-            if "GEMINI_API_KEY" not in st.secrets:
-                st.error("需先設定 API 金鑰才能使用此功能！")
-            else:
-                specialty = random.choice(specialties)
-                st.session_state.task = random.choice(tasks)
-                st.session_state.quiz_result = None # 重新抽題時清空測驗結果
-                st.session_state.current_content = None 
-                
-                with st.spinner(f"正在搜尋 AAHA/ACVIM/JVIM 關於 {specialty} 的多元文獻，請稍候..."):
-                    result = generate_medical_content(specialty)
-                    if "error" in result:
-                        st.error(result["error"])
-                    else:
-                        st.session_state.current_content = {
-                            "title": f"AI 生成文獻特訓：{specialty}",
-                            "english_text": result["english_text"],
-                            "vocab": result["vocab"],
-                            "chinese_translation": result["chinese_translation"],
-                            "sample_answer": result["sample_answer"],
-                            "quiz": result["quiz"]
-                        }
+def normalize(c, title):
+    v = parse_vocab(c["vocab"]) if isinstance(c["vocab"], str) else c["vocab"]
+    q = dict(c["quiz"]); opts = list(q["options"]); random.shuffle(opts)
+    if q["answer"] not in opts:
+        opts[0] = q["answer"]
+    q["options"] = opts
+    qa = c.get("qa_question") or "What is your own clinical approach to this issue, and why?"
+    return {**c, "title": title, "vocab": v, "quiz": q, "qa_question": qa}
 
-    # --- 渲染內容區 ---
-    if st.session_state.current_content:
-        content = st.session_state.current_content
-        
-        st.success("任務與文獻短講準備完畢！")
-        st.subheader(f"📌 主題：{content['title']}")
-        st.markdown(f"**🎯 訓練方式：{st.session_state.task['name']}**")
-        st.write(st.session_state.task["desc"])
-        
-        st.divider()
-        st.markdown("### 📖 今日特訓內容")
-        
-        text_to_read = content["english_text"]
-        
-        with st.spinner("🎧 正在生成 1 分鐘講者語音，請稍候..."):
-            tts = gTTS(text=text_to_read, lang='en', tld='us') 
-            fp = io.BytesIO()
-            tts.write_to_fp(fp)
-            st.audio(fp, format='audio/mp3')
-            
-        st.info(text_to_read)
-        st.markdown("**💡 關鍵語塊 (Lexical Chunks)：**")
-        st.write(content["vocab"])
-        
-        with st.expander("👁️ 點我核對中文翻譯與示範解答"):
-            st.markdown("**【中文翻譯】**")
-            st.write(content["chinese_translation"])
-            st.markdown("**【C1 程度示範解答 / 摘要】**")
-            st.write(content["sample_answer"])
-            
-        st.divider()
-        st.markdown("### 🧠 隨堂小測驗 (Pop Quiz)")
-        quiz_data = content["quiz"]
-        st.write(quiz_data["question"])
-        
-        # --- 全新改版：觸控友善大按鈕 ---
-        if st.session_state.quiz_result is None:
-            # 如果還沒作答，顯示選項大按鈕
-            for option in quiz_data["options"]:
-                # use_container_width=True 讓按鈕填滿手機螢幕寬度，超級好點！
-                if st.button(option, use_container_width=True, key=option):
-                    if option == quiz_data["answer"]:
-                        st.session_state.quiz_result = ("correct", quiz_data['explanation'])
-                    else:
-                        st.session_state.quiz_result = ("incorrect", quiz_data['explanation'])
-                    st.rerun() # 點擊後立即重新整理畫面顯示結果
-        else:
-            # 如果已經作答，顯示結果與詳解
-            status, explanation = st.session_state.quiz_result
-            if status == "correct":
-                st.success(f"**Correct! 🎉**\n\n{explanation}")
-            else:
-                st.error(f"**Incorrect. 💡**\n\n{explanation}")
-                
-            # 給予重新挑戰的機會
-            if st.button("🔄 重新作答", use_container_width=True):
-                st.session_state.quiz_result = None
-                st.rerun()
-        
-        st.divider()
-        st.write("⏱️ **15 分鐘專注計時與打卡**")
-        
-        self_rating = st.slider("今天口說表現給自己打幾分？(1-5分)", min_value=1, max_value=5, value=3)
-        
-        if st.button("開始計時並記錄打卡"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            for percent_complete in range(100):
-                time.sleep(9) 
-                progress_bar.progress(percent_complete + 1)
-                status_text.text(f"特訓進行中... {percent_complete + 1}%")
-            
-            st.balloons()
-            st.success("🎉 今日 15 分鐘特訓完成！")
-            
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            new_record = pd.DataFrame([{
-                "日期": today_str,
-                "來源與領域": content["title"],
-                "訓練方式": st.session_state.task["name"],
-                "自我評分": f"{'⭐' * self_rating}"
-            }])
-            st.session_state.learning_log = pd.concat([st.session_state.learning_log, new_record], ignore_index=True)
+def generate(specialty, topic, seen):
+    prompt = f"""你是一位獸醫專科醫師，正在為台灣獸醫師準備國際研討會英文口說教材。
+領域：{specialty}。{"指定主題：" + topic if topic else "請自選一個臨床議題，不要只講最常見的疾病。"}
+請避免這些已出現過的主題：{seen[-10:] or "無"}。
+撰寫約 1 分鐘（130-150 字）的口語化英文研討會短講，加入學術轉折語（signposting）。
+依你所知的指引（AAHA、ACVIM 等）撰寫，但不要捏造具體數據、研究或引用；不確定的細節用保守說法。
+只回傳 JSON，欄位如下：
+title（繁中主題名）, english_text, vocab（3-4 個物件 {{"term":"英文語塊","zh":"中文"}}）,
+chinese_translation（繁中翻譯）, sample_answer（一句高階總結，格式 English. (中文。)）,
+qa_question（一個聽眾會問的英文問題）,
+quiz {{question, options（4 個英文選項）, answer（必須與其中一個選項完全相同）, explanation（繁中詳解）}}"""
+    r = client.models.generate_content(
+        model=MODEL, contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=1.0))
+    return json.loads(r.text)
 
-with tab2:
-    st.subheader("📊 我的學習履歷")
-    if len(st.session_state.learning_log) == 0:
-        st.info("目前還沒有紀錄，趕快去完成今天的任務吧！")
+def coach(audio_bytes, c, task):
+    prompt = f"""你是英文口說教練，學員是獸醫師，目標是國際研討會水準。
+參考講稿：{c['english_text']}
+今天的訓練：{task['name']}；Q&A 問題：{c['qa_question']}
+請聆聽錄音，用繁體中文（Markdown）回覆：
+1. 逐字稿（英文）
+2. 做得好的 3 點
+3. 最該改進的 3 點（發音、文法、用詞、流暢度、結構），每點引用錄音中的實例
+4. 一段升級版說法（英文＋中文）
+若錄音幾乎沒有內容，直接說明。"""
+    r = client.models.generate_content(model=MODEL, contents=[
+        prompt, types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")])
+    return r.text
+
+# ---------- 狀態 ----------
+S = st.session_state
+for k, v in dict(content=None, task=None, fb=None, timer_end=None, seen=[], qn=0, rv=False).items():
+    S.setdefault(k, v)
+vocab, log = load_vocab(), load_log()
+
+def start(c, choice):
+    S.content, S.fb, S.timer_end, S.rv = c, None, None, False
+    S.qn += 1
+    S.task = random.choice(tasks) if choice == "隨機" else next(t for t in tasks if t["name"] == choice)
+    S.seen.append(c["title"])
+
+@st.fragment(run_every=1)
+def timer_box():
+    left = int(S.timer_end - time.time())
+    if left > 0:
+        st.progress(1 - left / 900, text=f"⏱️ 剩餘 {left // 60:02d}:{left % 60:02d}")
     else:
-        st.dataframe(st.session_state.learning_log, use_container_width=True, hide_index=True)
+        st.success("⏰ 15 分鐘到了！")
+
+# ---------- 介面 ----------
+st.title("🩺 VetSpeak 15")
+t1, t2, t3 = st.tabs(["🚀 今日特訓", "🔁 單字複習", "📈 學習紀錄"])
+
+with t1:
+    specialty = st.selectbox("領域（AI 模式使用）", specialties)
+    topic = st.text_input("想講的主題（可留空，由 AI 挑選）", placeholder="例如：犬心房顫動的處置")
+    choice = st.radio("訓練方式", ["隨機"] + [t["name"] for t in tasks], horizontal=True)
+    c1, c2 = st.columns(2)
+    if c1.button("🚀 內建題庫（秒開）"):
+        pool = [k for k in builtin_library if k not in S.seen[-1:]]
+        k = random.choice(pool or list(builtin_library))
+        start(normalize(builtin_library[k], f"內建：{k}"), choice)
+    if c2.button("🤖 AI 生成新講稿", disabled=client is None,
+                 help=None if client else "請先設定 GEMINI_API_KEY"):
+        with st.spinner("AI 正在撰寫講稿…"):
+            try:
+                r = generate(specialty, topic, S.seen)
+                start(normalize(r, f"AI：{r['title']}"), choice)
+            except Exception as e:
+                st.error(f"生成失敗，請再試一次。（{e}）")
+
+    c = S.content
+    if c:
+        st.divider()
+        st.subheader(c["title"])
+        st.markdown(f"**{S.task['name']}**")
+        st.write(S.task["desc"])
+        if "Q&A" in S.task["name"]:
+            st.info(f"🙋 聽眾提問：{c['qa_question']}")
+
+        speed = st.radio("語速", ["正常", "慢速"], horizontal=True)
+        st.audio(tts(c["english_text"], speed == "慢速"), format="audio/mp3")
+        if st.toggle("👂 盲聽模式（先不看講稿）", value=False):
+            st.caption("先聽兩遍、試著抓重點，再關閉開關對照講稿。")
+        else:
+            st.info(c["english_text"])
+
+        st.markdown("**💡 關鍵語塊（點 ＋ 加入單字本）**")
+        for i, v in enumerate(c["vocab"]):
+            a, b = st.columns([5, 1])
+            a.markdown(f"**{v['term']}** — {v['zh']}")
+            have = v["term"] in vocab
+            if b.button("✓" if have else "＋", key=f"v{S.qn}_{i}", disabled=have):
+                vocab[v["term"]] = {"zh": v["zh"], "box": 0, "due": str(date.today())}
+                save_vocab(vocab)
+                st.rerun()
+        with st.expander("👁️ 中文翻譯與示範解答"):
+            st.write(c["chinese_translation"])
+            st.markdown(f"**示範摘要：** {c['sample_answer']}")
+
+        st.divider()
+        st.markdown("### 🧠 隨堂小測驗")
+        q = c["quiz"]
+        pick = st.radio(q["question"], q["options"], index=None, key=f"quiz{S.qn}")
+        if pick:
+            ok = pick == q["answer"]
+            (st.success if ok else st.error)(
+                ("答對了 🎉" if ok else f"答錯了，正確答案：{q['answer']}") + f"\n\n{q['explanation']}")
+
+        st.divider()
+        st.markdown("### 🎙️ 錄下你的口說")
+        rec = st.audio_input("按下錄音，完成後可回放")
+        if rec:
+            if client and st.button("🤖 請 AI 教練給回饋"):
+                with st.spinner("教練正在聆聽…"):
+                    try:
+                        S.fb = coach(rec.getvalue(), c, S.task)
+                    except Exception as e:
+                        st.error(f"回饋失敗：{e}")
+        if S.fb:
+            st.markdown(S.fb)
+
+        st.divider()
+        st.markdown("### ⏱️ 15 分鐘計時與打卡")
+        if st.button("開始計時"):
+            S.timer_end = time.time() + 900
+        if S.timer_end:
+            timer_box()
+        rating = st.slider("今天口說表現自評", 1, 5, 3)
+        if st.button("✅ 完成並打卡", type="primary"):
+            mins = max(1, round((time.time() - (S.timer_end - 900)) / 60)) if S.timer_end else 0
+            row = pd.DataFrame([[str(date.today()), c["title"], S.task["name"], mins, "⭐" * rating]],
+                               columns=LOG_COLS)
+            pd.concat([log, row], ignore_index=True).to_csv(LOG_F, index=False)
+            S.timer_end = None
+            st.balloons()
+            st.success("已記錄！")
+
+with t2:
+    today = str(date.today())
+    due = [k for k, v in vocab.items() if v["due"] <= today]
+    st.caption(f"單字本共 {len(vocab)} 個，今天待複習 {len(due)} 個（間隔 1／3／7／14／30 天）")
+    if not due:
+        st.success("🎉 今天沒有要複習的單字。" if vocab else "先在特訓頁把語塊加入單字本吧！")
+    else:
+        w = due[0]; v = vocab[w]
+        with st.container(border=True):
+            st.markdown(f"## {w}")
+            st.audio(tts(w), format="audio/mp3")
+            if not S.rv:
+                if st.button("顯示意思"):
+                    S.rv = True; st.rerun()
+            else:
+                st.markdown(f"### {v['zh']}")
+                a, b = st.columns(2)
+                for col, label, ok in ((a, "😵 忘了", False), (b, "😎 記得", True)):
+                    if col.button(label, key=label):
+                        v["box"] = min(v["box"] + 1, 4) if ok else 0
+                        v["due"] = str(date.today() + timedelta(days=IV[v["box"]]))
+                        save_vocab(vocab); S.rv = False; st.rerun()
+
+with t3:
+    if log.empty:
+        st.info("還沒有紀錄，完成今天的特訓吧！")
+    else:
+        days = set(log["日期"])
+        m1, m2, m3 = st.columns(3)
+        m1.metric("連續天數", streak(days))
+        m2.metric("累計次數", len(log))
+        m3.metric("累計分鐘", int(log["分鐘"].sum()))
+        last14 = pd.Series(list(log["日期"])).value_counts()
+        idx = [str(date.today() - timedelta(days=i)) for i in range(13, -1, -1)]
+        st.bar_chart(last14.reindex(idx, fill_value=0))
+        st.dataframe(log.iloc[::-1], hide_index=True)
+        st.download_button("⬇️ 下載紀錄 CSV", log.to_csv(index=False).encode("utf-8-sig"), "vetspeak_log.csv")
+    st.caption("紀錄存在伺服器的 data/ 資料夾。若部署在 Streamlit Cloud，重啟後可能清空，請定期下載備份。")
