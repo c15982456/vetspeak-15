@@ -14,7 +14,7 @@ st.set_page_config(page_title="VetSpeak 15 - AI 讀文獻", page_icon="🩺", la
 # --- 設定 Gemini API ---
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
 else:
     st.error("請先在 Streamlit Secrets 中設定 GEMINI_API_KEY！")
     st.stop()
