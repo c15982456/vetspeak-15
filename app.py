@@ -1,4 +1,52 @@
-import re # 請確認程式碼最上方有 import re，如果沒有請加上去
+import streamlit as st
+import random
+import time
+from gtts import gTTS
+import io
+import pandas as pd
+from datetime import datetime
+import google.generativeai as genai
+import json
+import re
+
+st.set_page_config(page_title="VetSpeak 15 - AI 讀文獻", page_icon="🩺", layout="centered")
+
+# --- 設定 Gemini API ---
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    st.error("請先在 Streamlit Secrets 中設定 GEMINI_API_KEY！")
+    st.stop()
+
+# --- 領域與任務設定 ---
+specialties = [
+    "小動物心臟科 (重點包含 MMVD, MINE 評分, 心衰竭)",
+    "小動物眼科 (重點包含 白內障手術併發症, 青光眼, 葡萄膜炎)",
+    "小動物臨床營養學 (重點包含 CKD 處方飼料, 腸胃道疾病, 肥胖管理)"
+]
+
+sources = ["AAHA Guidelines", "ACVIM Consensus Statements", "JVIM 最新發表文獻"]
+
+tasks = [
+    {"name": "🗣️ 影子跟讀 (Shadowing)", "desc": "先聽一次發音。接著戴上耳機，按下播放，講者說什麼慢 0.5 秒跟著唸，注意換氣與斷句。"},
+    {"name": "🎤 Q&A 實戰模擬", "desc": "聽完這段 1 分鐘的引言後，給自己 2 分鐘全英文口頭發表你的觀點。"},
+    {"name": "📝 臨床口頭摘要", "desc": "聽完語音後，用自己的話將這 1 分鐘的內容濃縮，向學員做 30 秒的精華報告。"}
+]
+
+# --- 狀態管理區 ---
+if "specialty" not in st.session_state:
+    st.session_state.specialty = None
+if "source" not in st.session_state:
+    st.session_state.source = None
+if "task" not in st.session_state:
+    st.session_state.task = None
+if "generated_content" not in st.session_state:
+    st.session_state.generated_content = None
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
+if "learning_log" not in st.session_state:
+    st.session_state.learning_log = pd.DataFrame(columns=["日期", "來源與領域", "訓練方式", "自我評分"])
 
 # --- AI 生成邏輯 (強化過濾版) ---
 def generate_medical_content(specialty, source):
@@ -32,3 +80,27 @@ def generate_medical_content(specialty, source):
             return {"error": "生成失敗，AI 未回傳正確的格式，請再點擊一次按鈕。"}
     except Exception as e:
         return {"error": f"發生錯誤，請再試一次。詳細錯誤訊息：{e}"}
+
+# --- UI 介面區 ---
+st.title("🏃 VetSpeak 15 - 最新文獻特訓")
+
+tab1, tab2 = st.tabs(["🚀 今日特訓", "📈 學習紀錄"])
+
+with tab1:
+    if st.button("🚀 呼叫 AI 擷取最新文獻並生成任務"):
+        st.session_state.specialty = random.choice(specialties)
+        st.session_state.source = random.choice(sources)
+        st.session_state.task = random.choice(tasks)
+        st.session_state.quiz_submitted = False
+        st.session_state.generated_content = None 
+        
+        with st.spinner(f"正在分析 {st.session_state.source} 中關於 {st.session_state.specialty} 的文獻..."):
+            result = generate_medical_content(st.session_state.specialty, st.session_state.source)
+            if "error" in result:
+                st.error(result["error"])
+            else:
+                st.session_state.generated_content = result
+
+    if st.session_state.generated_content:
+        st.success("任務與文獻短講生成成功！")
+        st.subheader(f"📌 來源：{st.session_state.source}")
