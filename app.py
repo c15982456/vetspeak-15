@@ -122,4 +122,231 @@ def save_vocab(v):
     VOC_F.write_text(json.dumps(v, ensure_ascii=False, indent=1), "utf-8")
 
 # ---------- AI 與語音核心 ----------
-@st.cache_data
+@st.cache_data(show_spinner=False)
+def tts(text, slow=False): 
+    fp = io.BytesIO()
+    gTTS(text=text, lang="en", tld="us", slow=slow).write_to_fp(fp)
+    return fp.getvalue()
+
+def generate(specialty, topic, seen):
+    prompt = f"""你是一位獸醫專科醫師，正在為台灣獸醫師準備國際研討會英文口說教材。
+領域：{specialty}。{"指定主題：" + topic if topic else "請自選一個進階的臨床議題，不要只講最常見的基礎疾病。"}
+避免出現過的主題：{seen[-10:] or "無"}。
+撰寫約 1 分鐘（130-150 字）的口語化英文研討會短講，加入學術轉折語（signposting）。
+請務必以純 JSON 格式回傳，格式必須嚴格如下：
+{{
+    "title": "繁中主題名",
+    "english_text": "英文講稿內容...",
+    "vocab": [
+        {{"term": "英文語塊", "zh": "繁中解釋"}},
+        {{"term": "英文語塊", "zh": "繁中解釋"}},
+        {{"term": "英文語塊", "zh": "繁中解釋"}}
+    ],
+    "chinese_translation": "精確繁中翻譯",
+    "sample_answer": "一句高階總結，格式：English sentence. (中文翻譯。)",
+    "qa_question": "一個進階的聽眾英文提問",
+    "quiz": {{
+        "question": "根據講稿出一題英文單選題",
+        "options": ["選項 A", "選項 B", "選項 C", "選項 D"],
+        "answer": "正確的選項文字（必須與選項完全一致）",
+        "explanation": "繁中詳解"
+    }}
+}}
+"""
+    # 【修正 2】啟用 Google 原生 JSON 模式，徹底根除格式報錯
+    r = model.generate_content(
+        prompt,
+        generation_config={"response_mime_type": "application/json"}
+    )
+    return json.loads(r.text)
+
+def coach(audio_bytes, c, task):
+    prompt = f"""你是高階獸醫英文口說教練。學員目標是能流暢參與國際研討會。
+參考講稿：{c['english_text']}
+今天的訓練模式：{task['name']}；（若為 Q&A，提問是：{c['qa_question']}）
+請聆聽學員的錄音，並用繁體中文 Markdown 格式回覆：
+1. **🗣️ 學員逐字稿 (Transcript)**：(列出你聽到的英文)
+2. **🌟 值得稱讚的 3 點**：(語氣、專業字彙等)
+3. **🛠️ 最該改進的 3 點**：(發音、文法或停頓，請明確指出錄音中哪裡講錯)
+4. **🚀 教練升級版說法**：(提供一段道地的高階英文示範，附中文翻譯)
+"""
+    r = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+    return r.text
+
+# ---------- 狀態管理 ----------
+S = st.session_state
+for k in ["content", "task", "fb", "timer_end", "seen", "qn", "quiz_done", "rv"]:
+    S.setdefault(k, None if k not in ["seen", "qn", "quiz_done", "rv"] else ([] if k == "seen" else (0 if k == "qn" else False)))
+vocab, log = load_vocab(), load_log()
+
+def start_training(c, choice):
+    S.content, S.fb, S.timer_end = c, None, None
+    S.quiz_done = False
+    S.qn += 1
+    S.task = random.choice(tasks) if choice == "隨機" else next(t for t in tasks if t["name"] == choice)
+    S.seen.append(c["title"])
+
+# ---------- 介面區 ----------
+st.title("🩺 VetSpeak 15 - 雙引擎高階版")
+t1, t2, t3 = st.tabs(["🚀 今日特訓", "🔁 單字複習", "📈 學習紀錄"])
+
+with t1:
+    with st.expander("⚙️ 訓練設定 (AI 模式適用)", expanded=False):
+        specialty = st.selectbox("專科領域", specialties)
+        topic = st.text_input("想指定的主題（可留空交給 AI）", placeholder="例如：犬心房顫動的處置")
+    
+    choice = st.radio("訓練方式", ["隨機"] + [t["name"] for t in tasks], horizontal=True)
+    
+    c1, c2 = st.columns(2)
+    if c1.button("🚀 內建經典題庫 (秒開)", use_container_width=True):
+        k = random.choice(list(builtin_library.keys()))
+        data = builtin_library[k]
+        data["title"] = f"經典：{k}"
+        start_training(data, choice)
+        
+    if c2.button("🤖 AI 寫新講稿 (需等候)", use_container_width=True):
+        if not model:
+            st.error("請先在 Streamlit Secrets 設定 GEMINI_API_KEY！")
+        else:
+            with st.spinner("AI 正在查閱文獻並撰寫講稿..."):
+                try:
+                    r = generate(specialty, topic, S.seen)
+                    r["title"] = f"AI：{r['title']}"
+                    start_training(r, choice)
+                except Exception as e:
+                    st.error(f"生成失敗，請再點擊一次。（錯誤訊息：{e}）")
+
+    # --- 渲染教材 ---
+    c = S.content
+    if c:
+        st.divider()
+        st.subheader(c["title"])
+        st.markdown(f"**🎯 訓練任務：{S.task['name']}**")
+        st.write(S.task["desc"])
+        if "Q&A" in S.task["name"]:
+            st.warning(f"**🙋 聽眾提問：** {c['qa_question']}")
+
+        speed = st.radio("語音播放速度", ["正常速度", "慢速拆解"], horizontal=True)
+        st.audio(tts(c["english_text"], speed == "慢速拆解"), format="audio/mp3")
+        
+        if st.toggle("👂 盲聽模式（開啟後隱藏講稿）", value=False):
+            st.caption("建議先純聽兩次，試著抓出主旨與專有名詞，再關閉本開關對照講稿。")
+        else:
+            st.info(c["english_text"])
+
+        st.markdown("**💡 關鍵語塊（Lexical Chunks）**")
+        for i, v in enumerate(c["vocab"]):
+            col_word, col_btn = st.columns([5, 1])
+            col_word.markdown(f"**{v['term']}** — {v['zh']}")
+            have = v["term"] in vocab
+            if col_btn.button("✓ 已加入" if have else "➕", key=f"voc_{S.qn}_{i}", disabled=have):
+                vocab[v["term"]] = {"zh": v["zh"], "box": 0, "due": str(date.today())}
+                save_vocab(vocab)
+                st.rerun()
+                
+        with st.expander("👁️ 點我核對中文翻譯與示範解答"):
+            st.write(c["chinese_translation"])
+            st.markdown(f"**示範摘要：** {c['sample_answer']}")
+
+        # 大按鈕測驗區
+        st.divider()
+        st.markdown("### 🧠 隨堂小測驗")
+        q = c["quiz"]
+        st.write(q["question"])
+        
+        if not S.quiz_done:
+            opts = list(q["options"])
+            random.shuffle(opts)
+            for opt in opts:
+                if st.button(opt, use_container_width=True, key=f"q_{S.qn}_{opt}"):
+                    S.quiz_done = True
+                    S.quiz_ans = opt
+                    st.rerun()
+        else:
+            if S.quiz_ans == q["answer"]:
+                st.success(f"**Correct! 🎉**\n\n{q['explanation']}")
+            else:
+                st.error(f"**Incorrect. 💡** (正確答案是: {q['answer']})\n\n{q['explanation']}")
+            if st.button("🔄 重新測驗", use_container_width=True):
+                S.quiz_done = False
+                st.rerun()
+
+        # 錄音與 AI 教練回饋
+        st.divider()
+        st.markdown("### 🎙️ 錄下你的口說並取得 AI 評分")
+        rec = st.audio_input("錄音完成後，可點擊下方按鈕呼叫 AI 教練")
+        if rec:
+            if model and st.button("🤖 呼叫 AI 教練講評", type="primary", use_container_width=True):
+                with st.spinner("AI 教練正在仔細聆聽你的發音與用字..."):
+                    try:
+                        S.fb = coach(rec.getvalue(), c, S.task)
+                    except Exception as e:
+                        st.error(f"分析失敗，請確認錄音或 API。（{e}）")
+        if S.fb:
+            with st.container(border=True):
+                st.markdown(S.fb)
+
+        # 計時打卡
+        st.divider()
+        st.markdown("### ⏱️ 15 分鐘專注計時與打卡")
+        if st.button("開始計時", use_container_width=True):
+            S.timer_end = time.time() + 900
+            
+        if S.timer_end:
+            left = int(S.timer_end - time.time())
+            if left > 0:
+                st.progress(1 - left / 900, text=f"⏱️ 訓練進行中... 剩餘 {left // 60:02d}:{left % 60:02d}")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.success("⏰ 15 分鐘專注訓練達成！")
+                
+        rating = st.slider("今天口說表現給自己打幾分？", 1, 5, 3)
+        if st.button("✅ 結束今日任務並打卡", type="primary", use_container_width=True):
+            mins = max(1, round((time.time() - (S.timer_end - 900)) / 60)) if S.timer_end else 0
+            row = pd.DataFrame([[str(date.today()), c["title"], S.task["name"], mins, "⭐" * rating]], columns=LOG_COLS)
+            pd.concat([log, row], ignore_index=True).to_csv(LOG_F, index=False)
+            S.timer_end = None
+            log = load_log()
+            st.balloons()
+            st.success("🎉 已成功記錄到學習履歷中！")
+
+with t2:
+    today = str(date.today())
+    due = [k for k, v in vocab.items() if v["due"] <= today]
+    st.subheader(f"📖 待複習字彙：{len(due)} 個")
+    if not due:
+        st.success("🎉 太棒了！今天沒有要複習的單字。")
+    else:
+        w = due[0]
+        v = vocab[w]
+        with st.container(border=True):
+            st.markdown(f"<h2 style='text-align:center;'>{w}</h2>", unsafe_allow_html=True)
+            st.audio(tts(w), format="audio/mp3")
+            if not S.rv:
+                if st.button("👁️ 顯示中文意思", use_container_width=True):
+                    S.rv = True
+                    st.rerun()
+            else:
+                st.markdown(f"<h3 style='text-align:center;'>{v['zh']}</h3>", unsafe_allow_html=True)
+                a, b = st.columns(2)
+                if a.button("😵 忘記了", use_container_width=True):
+                    v["box"] = 0
+                    v["due"] = str(date.today() + timedelta(days=1))
+                    save_vocab(vocab)
+                    S.rv = False
+                    st.rerun()
+                if b.button("😎 記得很熟", type="primary", use_container_width=True):
+                    v["box"] = min(v["box"] + 1, 4)
+                    IV = [1, 3, 7, 14, 30]
+                    v["due"] = str(date.today() + timedelta(days=IV[v["box"]]))
+                    save_vocab(vocab)
+                    S.rv = False
+                    st.rerun()
+
+with t3:
+    st.subheader("📊 我的學習履歷")
+    if log.empty:
+        st.info("目前還沒有紀錄，趕快去完成今天的任務吧！")
+    else:
+        st.dataframe(log.iloc[::-1], use_container_width=True, hide_index=True)
