@@ -3,10 +3,12 @@ import random
 import time
 from gtts import gTTS
 import io
+import pandas as pd
+from datetime import datetime
 
 st.set_page_config(page_title="VetSpeak 15", page_icon="🩺", layout="centered")
 
-# 終極版：加入隨堂小測驗的題庫
+# --- 題庫區 ---
 content_library = {
     "MMVD 分期與 MINE 評分": {
         "english_text": "We know the transition from Stage B1 to B2 is a critical decision point for initiating pimobendan based on the ACVIM consensus guidelines. In your clinical experience, how does integrating the MINE score help in those grey-zone cases where echocardiographic parameters like LA to Ao and LVIDDN are borderline?",
@@ -62,83 +64,113 @@ content_library = {
 }
 
 topics = list(content_library.keys())
-
 tasks = [
     {"name": "🗣️ 影子跟讀 (Shadowing)", "desc": "先聽一次發音。接著戴上耳機，按下播放，講者說什麼慢 0.5 秒跟著唸，模仿語氣。"},
     {"name": "🎤 Q&A 實戰模擬", "desc": "聽完問題後，給自己 2 分鐘全英文口頭回答。回答完再點開下方解答核對。"},
     {"name": "📝 臨床口頭摘要", "desc": "聽完語音後，用自己的話將這段內容濃縮，向學員做 3 分鐘精華報告。"}
 ]
 
-st.title("🏃 VetSpeak 15 每日研討會特訓")
-
+# --- 狀態管理區 ---
 if "topic" not in st.session_state:
     st.session_state.topic = None
 if "task" not in st.session_state:
     st.session_state.task = None
-# 加入一個狀態來記住測驗是否已作答
 if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
+if "learning_log" not in st.session_state:
+    # 建立一個空的資料表來放紀錄
+    st.session_state.learning_log = pd.DataFrame(columns=["日期", "主題", "訓練方式", "自我評分"])
 
-if st.button("🚀 抽取今日特訓任務"):
-    st.session_state.topic = random.choice(topics)
-    st.session_state.task = random.choice(tasks)
-    st.session_state.quiz_submitted = False # 重新抽題時重置作答狀態
+# --- UI 介面區 ---
+st.title("🏃 VetSpeak 15 每日研討會特訓")
 
-if st.session_state.topic and st.session_state.task:
-    st.success("任務生成成功！")
-    st.subheader(f"📌 今日主題：{st.session_state.topic}")
-    st.markdown(f"**🎯 訓練方式：{st.session_state.task['name']}**")
-    st.write(st.session_state.task["desc"])
-    
-    st.divider()
-    st.markdown("### 📖 今日特訓內容")
-    
-    text_to_read = content_library[st.session_state.topic]["english_text"]
-    
-    with st.spinner("🎧 正在生成專業講者語音..."):
-        tts = gTTS(text=text_to_read, lang='en', tld='us') 
-        fp = io.BytesIO()
-        tts.write_to_fp(fp)
-        st.audio(fp, format='audio/mp3')
+# 頁籤設計：分開「今日任務」與「學習紀錄」
+tab1, tab2 = st.tabs(["🚀 今日特訓", "📈 學習紀錄"])
+
+with tab1:
+    if st.button("🚀 抽取今日特訓任務"):
+        st.session_state.topic = random.choice(topics)
+        st.session_state.task = random.choice(tasks)
+        st.session_state.quiz_submitted = False
+
+    if st.session_state.topic and st.session_state.task:
+        st.success("任務生成成功！")
+        st.subheader(f"📌 今日主題：{st.session_state.topic}")
+        st.markdown(f"**🎯 訓練方式：{st.session_state.task['name']}**")
+        st.write(st.session_state.task["desc"])
         
-    st.info(text_to_read)
-    st.markdown("**💡 關鍵語塊 (Lexical Chunks)：**")
-    st.write(content_library[st.session_state.topic]["vocab"])
-    
-    with st.expander("👁️ 點我核對中文翻譯與示範解答"):
-        st.markdown("**【中文翻譯】**")
-        st.write(content_library[st.session_state.topic]["chinese_translation"])
-        st.markdown("**【C1 程度示範解答 / 摘要】**")
-        st.write(content_library[st.session_state.topic]["sample_answer"])
+        st.divider()
+        st.markdown("### 📖 今日特訓內容")
         
-    st.divider()
-    st.markdown("### 🧠 隨堂小測驗 (Pop Quiz)")
-    quiz_data = content_library[st.session_state.topic]["quiz"]
-    st.write(quiz_data["question"])
-    
-    # 建立選擇題 UI
-    user_choice = st.radio("請選擇最適合的答案：", quiz_data["options"], index=None, key=f"quiz_{st.session_state.topic}")
-    
-    if st.button("📝 送出答案"):
-        st.session_state.quiz_submitted = True
+        text_to_read = content_library[st.session_state.topic]["english_text"]
         
-    if st.session_state.quiz_submitted:
-        if user_choice == quiz_data["answer"]:
-            st.success(f"**Correct! 🎉**\n\n{quiz_data['explanation']}")
-        elif user_choice is not None:
-            st.error(f"**Incorrect. 💡**\n\n{quiz_data['explanation']}")
-        else:
-            st.warning("請先選擇一個選項再送出喔！")
-    
-    st.divider()
-    st.write("⏱️ **15 分鐘專注計時器**")
-    
-    if st.button("開始計時"):
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        for percent_complete in range(100):
-            time.sleep(9) 
-            progress_bar.progress(percent_complete + 1)
-            status_text.text(f"特訓進行中... {percent_complete + 1}%")
-        st.balloons()
-        st.success("🎉 今日 15 分鐘特訓完成！")
+        with st.spinner("🎧 正在生成專業講者語音..."):
+            tts = gTTS(text=text_to_read, lang='en', tld='us') 
+            fp = io.BytesIO()
+            tts.write_to_fp(fp)
+            st.audio(fp, format='audio/mp3')
+            
+        st.info(text_to_read)
+        st.markdown("**💡 關鍵語塊 (Lexical Chunks)：**")
+        st.write(content_library[st.session_state.topic]["vocab"])
+        
+        with st.expander("👁️ 點我核對中文翻譯與示範解答"):
+            st.markdown("**【中文翻譯】**")
+            st.write(content_library[st.session_state.topic]["chinese_translation"])
+            st.markdown("**【C1 程度示範解答 / 摘要】**")
+            st.write(content_library[st.session_state.topic]["sample_answer"])
+            
+        st.divider()
+        st.markdown("### 🧠 隨堂小測驗 (Pop Quiz)")
+        quiz_data = content_library[st.session_state.topic]["quiz"]
+        st.write(quiz_data["question"])
+        
+        user_choice = st.radio("請選擇最適合的答案：", quiz_data["options"], index=None, key=f"quiz_{st.session_state.topic}")
+        
+        if st.button("📝 送出答案"):
+            st.session_state.quiz_submitted = True
+            
+        if st.session_state.quiz_submitted:
+            if user_choice == quiz_data["answer"]:
+                st.success(f"**Correct! 🎉**\n\n{quiz_data['explanation']}")
+            elif user_choice is not None:
+                st.error(f"**Incorrect. 💡**\n\n{quiz_data['explanation']}")
+            else:
+                st.warning("請先選擇一個選項再送出喔！")
+        
+        st.divider()
+        st.write("⏱️ **15 分鐘專注計時與打卡**")
+        
+        # 新增自我評分機制
+        self_rating = st.slider("今天口說表現給自己打幾分？(1-5分)", min_value=1, max_value=5, value=3)
+        
+        if st.button("開始計時並記錄打卡"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            for percent_complete in range(100):
+                time.sleep(9) # 正式訓練時使用 (15分鐘)
+                # time.sleep(0.01) # 測試用，可暫時改這行快速跑完
+                progress_bar.progress(percent_complete + 1)
+                status_text.text(f"特訓進行中... {percent_complete + 1}%")
+            
+            st.balloons()
+            st.success("🎉 今日 15 分鐘特訓完成！")
+            
+            # 將紀錄寫入資料表
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            new_record = pd.DataFrame([{
+                "日期": today_str,
+                "主題": st.session_state.topic,
+                "訓練方式": st.session_state.task["name"],
+                "自我評分": f"{'⭐' * self_rating}"
+            }])
+            # 使用 pd.concat 更新 dataframe
+            st.session_state.learning_log = pd.concat([st.session_state.learning_log, new_record], ignore_index=True)
+
+with tab2:
+    st.subheader("📊 我的學習履歷")
+    if len(st.session_state.learning_log) == 0:
+        st.info("目前還沒有紀錄，趕快去完成今天的任務吧！")
+    else:
+        # 顯示 dataframe 表格
+        st.dataframe(st.session_state.learning_log, use_container_width=True, hide_index=True)
