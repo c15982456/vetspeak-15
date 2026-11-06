@@ -4,7 +4,6 @@ import time
 
 st.set_page_config(page_title="VetSpeak 15", page_icon="🩺", layout="centered")
 
-# 專屬專業資料庫
 topics = [
     "Myxomatous Mitral Valve Disease (MMVD) 分期與 MINE 評分",
     "小動物白內障手術 (Phacoemulsification) 術後併發症",
@@ -23,25 +22,32 @@ tasks = [
 st.title("🏃 VetSpeak 15 每日研討會特訓")
 st.write("每天 15 分鐘，無障礙征服國際獸醫研討會。")
 
+# 加入 Session State 記憶機制
+if "topic" not in st.session_state:
+    st.session_state.topic = None
+if "task" not in st.session_state:
+    st.session_state.task = None
+
 if st.button("🚀 抽取今日特訓任務"):
-    today_topic = random.choice(topics)
-    today_task = random.choice(tasks)
-    
+    st.session_state.topic = random.choice(topics)
+    st.session_state.task = random.choice(tasks)
+
+# 只要記憶體裡有任務，就把內容畫出來
+if st.session_state.topic and st.session_state.task:
     st.success("任務生成成功！")
-    st.subheader(f"📌 今日主題：{today_topic}")
-    st.markdown(f"**🎯 訓練方式：{today_task['name']}**")
-    st.write(today_task["desc"])
+    st.subheader(f"📌 今日主題：{st.session_state.topic}")
+    st.markdown(f"**🎯 訓練方式：{st.session_state.task['name']}**")
+    st.write(st.session_state.task["desc"])
     
     st.divider()
     st.write("⏱️ **15 分鐘專注計時器**")
     
-    # 簡單的進度條計時器 (網頁版示意)
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
+    # 開始計時按鈕點擊後，就不會再清空畫面了
     if st.button("開始計時"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         for percent_complete in range(100):
-            time.sleep(9) # 15分鐘 = 900秒，每次推進 1% 約 9 秒
+            time.sleep(9) # 每次推進 1% 約 9 秒 (共15分鐘)
             progress_bar.progress(percent_complete + 1)
             status_text.text(f"特訓進行中... {percent_complete + 1}%")
         st.balloons()
