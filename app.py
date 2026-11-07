@@ -1,4 +1,4 @@
-import io, json, os, random, re, time
+import difflib, io, json, os, random, re, time
 from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -29,7 +29,7 @@ if API_KEY:
     model = genai.GenerativeModel(MODEL)
 
 DATA = Path(__file__).parent / "data"; DATA.mkdir(exist_ok=True)
-LOG_F, VOC_F, BANK_F = DATA / "log.csv", DATA / "vocab.json", DATA / "bank.json"
+LOG_F, VOC_F, BANK_F, VER_F = DATA / "log.csv", DATA / "vocab.json", DATA / "bank.json", DATA / "verified.json"
 LOG_COLS = ["日期", "主題", "訓練方式", "分鐘", "自評"]
 IV = [1, 3, 7, 14, 30]  # 間隔複習天數
 
@@ -61,6 +61,17 @@ def load_bank():  # AI 生成過的講稿會存起來，之後可免額度重複
 def save_bank(c):
     b = load_bank(); b[c["title"]] = c
     BANK_F.write_text(json.dumps(b, ensure_ascii=False, indent=1), "utf-8")
+
+def load_ver():  # 使用者親自核對過原文的題目
+    return json.loads(VER_F.read_text("utf-8")) if VER_F.exists() else []
+
+def save_ver(v):
+    VER_F.write_text(json.dumps(v, ensure_ascii=False), "utf-8")
+
+LEVELS = {
+    "入門（短句、白話）": "撰寫約 90-110 字的英文短講。每句不超過 18 個字，用簡單句型與常見字，避免巢狀子句與罕用字；專有名詞保留，但前後句要用白話再解釋一次。語氣像向同事口頭說明。",
+    "進階（研討會）": "撰寫約 1 分鐘（130-150 字）的口語化英文研討會短講，加入學術轉折語（signposting）。",
+}
 
 def ai_err(e):
     m = str(e)
@@ -100,17 +111,18 @@ def normalize(c, title):
     qa = c.get("qa_question") or "What is your own clinical approach to this issue, and why?"
     return {**c, "title": title, "vocab": v, "quiz": q, "qa_question": qa}
 
-def generate(specialty, topic, seen, tick=None):
+def generate(specialty, topic, seen, level, tick=None):
     prompt = f"""你是一位獸醫專科醫師，正在為台灣獸醫師準備國際研討會英文口說教材。
 領域：{specialty}。{"指定主題：" + topic if topic else "請自選一個臨床議題，不要只講最常見的疾病。"}
 請避免這些已出現過的主題：{seen[-10:] or "無"}。
-撰寫約 1 分鐘（130-150 字）的口語化英文研討會短講，加入學術轉折語（signposting）。
+{LEVELS[level]}
 依你所知的指引（AAHA、ACVIM 等）撰寫，但不要捏造具體數據、研究或引用；不確定的細節用保守說法。
 只回傳 JSON，欄位如下：
 title（繁中主題名）, english_text, vocab（3-4 個物件 {{"term":"英文語塊","zh":"中文"}}）,
 chinese_translation（繁中翻譯）, sample_answer（一句高階總結，格式 English. (中文。)）,
 qa_question（一個聽眾會問的英文問題）,
 search_keywords（3-5 個可在 PubMed 查證此主題的英文關鍵字，逗號分隔；不要編造文獻或作者）,
+verify_points（3 個物件 {{"claim":"講稿中最需要查證的具體說法，數字、劑量、絕對說法優先","why":"為什麼要查證"}}）,
 quiz {{question, options（4 個英文選項）, answer（必須與其中一個選項完全相同）, explanation（繁中詳解）}}"""
     for attempt in range(2):  # JSON 格式偶爾出錯，自動重試一次
         buf = ""
@@ -162,6 +174,50 @@ def show_refs(c):
         if kw:
             st.markdown(f"[🔎 在 PubMed 搜尋相關文獻](https://pubmed.ncbi.nlm.nih.gov/?term={quote_plus(kw)})")
 
+def sents(t):
+    return [x for x in re.split(r"(?<=[.?!])\s+", t.strip()) if x]
+
+def toks(t):
+    return re.findall(r"[a-z0-9']+", t.lower().replace("’", "'"))
+
+def listening_lab(c):
+    en = sents(c["english_text"])
+    zh = [x for x in re.split(r"(?<=[。！？])", c["chinese_translation"]) if x.strip()]
+    with st.expander("🎧 逐句精聽與聽寫（聽不懂先從這裡開始）"):
+        i = st.select_slider("第幾句", options=list(range(1, len(en) + 1)), key=f"sl{S.qn}") - 1
+        st.caption("慢速"); st.audio(tts(en[i], True), format="audio/mp3")
+        st.caption("正常速度"); st.audio(tts(en[i]), format="audio/mp3")
+        if len(zh) == len(en):
+            if st.toggle("顯示這句中文", key=f"zh{S.qn}_{i}"):
+                st.write(zh[i])
+        else:
+            st.caption("（此題中文無法逐句對齊，請看下方完整翻譯）")
+        if st.toggle("顯示這句英文", key=f"en{S.qn}_{i}"):
+            st.write(en[i])
+        typed = st.text_input("✍️ 聽寫：把聽到的打在這裡", key=f"dic{S.qn}_{i}")
+        if typed:
+            a, b = toks(en[i]), toks(typed)
+            acc = difflib.SequenceMatcher(None, a, b).ratio()
+            (st.success if acc >= .9 else st.warning)(f"正確率 {acc:.0%}")
+            miss = [w for w in dict.fromkeys(a) if w not in b]
+            if miss:
+                st.caption("漏聽或拼錯：" + "、".join(miss))
+
+def show_verify(c):
+    vkey, ver = c["title"].split("：", 1)[-1], load_ver()
+    with st.expander("🔍 待核對重點與查證狀態"):
+        pts = [p for p in (c.get("verify_points") or []) if isinstance(p, dict) and "claim" in p]
+        if not pts:
+            pat = re.compile(r"\d|\b(must|never|always|only|greater|exceeding|below|twice|quarter|third|twenty|forty|two|three)\b", re.I)
+            pts = [{"claim": x, "why": "含數字或絕對說法，最容易出錯"} for x in sents(c["english_text"]) if pat.search(x)][:4]
+        for p in pts:
+            st.markdown(f"- **{p['claim']}**  \n  ↳ {p.get('why', '')}")
+        st.caption("請對照上方參考文獻或 PubMed 原文逐項確認。")
+        done = st.checkbox("✅ 我已用原文核對過這份講稿", value=vkey in ver, key=f"ver{S.qn}")
+        if done != (vkey in ver):
+            save_ver(sorted(set(ver) | {vkey}) if done else [x for x in ver if x != vkey])
+            st.rerun()
+
 # ---------- 狀態 ----------
 S = st.session_state
 for k, v in dict(content=None, task=None, fb=None, timer_end=None, seen=[], qn=0, rv=False).items():
@@ -190,10 +246,16 @@ t1, t2, t3 = st.tabs(["🚀 今日特訓", "🔁 單字複習", "📈 學習紀�
 with t1:
     specialty = st.selectbox("領域（AI 模式使用）", specialties)
     topic = st.text_input("想講的主題（可留空，由 AI 挑選）", placeholder="例如：犬心房顫動的處置")
+    level = st.radio("AI 講稿難度（聽不懂就選入門）", list(LEVELS), horizontal=True)
     choice = st.radio("訓練方式", ["隨機"] + [t["name"] for t in tasks], horizontal=True)
+    only_ver = st.checkbox("只練我已核對過原文的題目")
     c1, c2 = st.columns(2)
     if c1.button(f"🚀 題庫（{len(library)} 題，不耗 AI 額度）"):
-        keys = [k for k in library if f"題庫：{k}" not in S.seen[-3:]] or list(library)
+        pool = [k for k in library if k in load_ver()] if only_ver else list(library)
+        if only_ver and not pool:
+            st.warning("還沒有標記為已查證的題目，先隨機出題。")
+            pool = list(library)
+        keys = [k for k in pool if f"題庫：{k}" not in S.seen[-3:]] or pool
         k = random.choice(keys)
         info, cc = REFS.get(k, {}), normalize(library[k], f"題庫：{k}")
         cc["refs"] = info.get("refs", [])
@@ -203,7 +265,7 @@ with t1:
                  help=None if model else "請先設定 GEMINI_API_KEY"):
         bar = st.progress(0.02, text="連線 AI 中…（約 10–30 秒）")
         try:
-            r = generate(specialty, topic, S.seen, lambda p, t: bar.progress(p, text=f"{int(p * 100)}%　{t}"))
+            r = generate(specialty, topic, S.seen, level, lambda p, t: bar.progress(p, text=f"{int(p * 100)}%　{t}"))
             bar.progress(1.0, text="100%　完成！")
             save_bank(r)
             start(normalize(r, f"AI：{r['title']}"), choice)
@@ -214,12 +276,13 @@ with t1:
     c = S.content
     if c:
         st.divider()
-        st.subheader(c["title"])
+        st.subheader(("✅ " if c["title"].split("：", 1)[-1] in load_ver() else "⚠️ 未查證 · ") + c["title"])
         st.markdown(f"**{S.task['name']}**")
         st.write(S.task["desc"])
         if "Q&A" in S.task["name"]:
             st.info(f"🙋 聽眾提問：{c['qa_question']}")
 
+        st.info("**聽不懂時的 4 步驟：** ① 先在「逐句精聽」看中文大意 ② 一次聽一句（慢速）③ 對照英文，不懂的語塊加入單字本 ④ 回到整段正常速度盲聽")
         speed = st.radio("語速", ["正常", "慢速"], horizontal=True)
         st.audio(tts(c["english_text"], speed == "慢速"), format="audio/mp3")
         if st.toggle("👂 盲聽模式（先不看講稿）", value=False):
@@ -227,6 +290,7 @@ with t1:
         else:
             st.info(c["english_text"])
 
+        listening_lab(c)
         st.markdown("**💡 關鍵語塊（點 ＋ 加入單字本）**")
         for i, v in enumerate(c["vocab"]):
             a, b = st.columns([5, 1])
@@ -241,6 +305,7 @@ with t1:
             st.markdown(f"**示範摘要：** {c['sample_answer']}")
 
         show_refs(c)
+        show_verify(c)
 
         st.divider()
         st.markdown("### 🧠 隨堂小測驗")
